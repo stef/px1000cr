@@ -1,0 +1,9 @@
+https://cryptography.fandom.com/wiki/Linear_feedback_shift_register
+https://crypto.stackexchange.com/questions/5293/cryptanalysis-of-linear-feedback-shift-registers
+http://www.practicalcryptography.com/cryptanalysis/modern-cryptanalysis/lfsrs-and-berlekampmassey-algorithm/
+https://crypto.stackexchange.com/questions/29676/profile-complexity-lfsr/29761
+
+https://github.com/mathieubrd/lfsr/blob/master/lfsr.c
+https://github.com/zhu-he/Berlekamp-Massey-algorithm
+https://en.wikipedia.org/wiki/Berlekamp%E2%80%93Massey_algorithm
+https://github.com/Pezeter/berlekamp_massey_gf2/blob/master/main.cpp

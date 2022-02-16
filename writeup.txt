@@ -1,0 +1,770 @@
+A tale of procrastination, the NSA, crypto-backdoors and symbolic execution
+
+Prologue
+
+Yours truly was meant to do paid work, porting some crypto protocol to
+browsers, this implied getting dirty with JavaScript, the insanity of
+fast changing and incompatible browser interfaces and other nasty
+beasts. Instead, yours truly remembered an existing device he saw at a
+Crypto Museum exhibition. Behold the incredible PX1000cr:
+
+https://cryptomuseum.com/crypto/philips/px1000/img/301282/000/full.jpg
+
+This diabolical pocket telex (an antique peer-to-peer messaging
+thingy) from 1983 had a unique feature, it came with DES encryption
+and was marketed at small companies and journalists. According to some
+rumors even the dutch government used some. This freaked out the the
+NSA, which sent emissary to buy all the stock from the market and
+pressured Philips to suspend sales of any such infernal devices. In
+'84 the NSA provided Philips with an alternative encryption algorithm,
+which they were happy with to be available on the market. The astute
+reader - being knowledgeable about the NSA's backdooring efforts -
+might immediately suspect that the new firmware might be "weird" in
+some ways. Yours truly certainly suspected mischief.
+
+ACT I - Exposition
+
+Luckily the fine people of the Crypto Museum, have not only dedicated
+a couple of pages to this device, they also published ROM dumps of the
+original DES-enabled and the agency-tainted device. Thus started my
+journey.
+
+The fine people of the Crypto Museum published also the bachelors
+thesis of a student reverse engineering this ROM himself, although Ben
+- the student - focused on the DES variant.
+
+http://www.cs.ru.nl/bachelorscripties/2014/Ben_Brucker___0413291___Government_intervention_on_consumer_crypto_hardware.pdf
+
+Although the thesis did not contain much source code, it was enough to
+have a head start that allowed me to dive directly into the encryption
+code.
+
+The first steps were a mistake. I could not resist the irony of using
+an Agency tool to break an Agency backdoor, hence I loaded the ROM
+into ghidra and started annotating memory addresses. After a spending
+hours on this I tried to disassemble the code, and only then I found
+out that ghidra does not support this particular CPU.
+
+Speaking of which, the CPU in question is a Hitachi HD6303 a
+derivative of a Motorola 6503, a very simple but for its time powerful
+8-bit processor. It only has four 16 bit registers: a stack pointer,
+an instruction pointer, an index register to address memory, and an
+accumulator. The latter can be accessed as a 16 bit register or as two
+8 bit registers. The instruction set is simple, but certainly capable
+of doing great things. Turns out the same CPU was also used in the
+venerable PSION II Personal Digital Assistant. This lucky coincidence
+means there are fans of this device, who document for example the
+instruction set:
+
+https://www.jaapsch.net/psion/mcmnemal.htm
+
+The fine people of the Crypto Museum also published an undated
+photocopied and scanned version of the CPU datasheet:
+
+https://cryptomuseum.com/crypto/philips/px1000/files/hd6303rp.pdf
+
+It took me a few days to first realize, that some pages are missing,
+to realizing that only the even numbered pages are missing, to
+realizing that the even-numbered pages start half-way into the
+document in decreasing order. All hints that the pages have been
+scanned while holding discordian principles high. Hail Eris, indeed!
+
+Having all this supporting information available, made it an easy
+effort to go from binary dump to an equivalent algorithm written in
+C. However there were some weird things. Like for example the
+encryption function starts with decreasing the pointer to the
+plaintext by one. Why? And where does that that preceding byte come
+from, and will people be offended if I index a C char array with -1?
+Questions which meant I had to either reverse engineer other parts of
+the ROM that were unrelated to the cryptographic algorithm, which I am
+too lazy to do. Or I had to find another way. Turns out the Psion II
+fans also had an emulator:
+
+https://github.com/dg1yfe/sim68xx
+
+One of the most active contributors to this fine piece of software is
+someone with a Hungarian name. Yours truly having lived there himself,
+and having founded a hackerspace there started to strongly suspsect
+that this particular Hungarian contributor must be known to me. I
+first suspected someone else, but that person put me on the right
+track, and it turned out indeed this contributor is a regular in these
+circles. After a friendly chat on IRC he also became interested in the
+ROM dumps, but - just like Ben the student- he focused on the DES
+version. I complained about this plaintext array that is indexed by
+-1, and that I had to rather get dirty with JavaScript and browsers
+instead of reverse engineering the whole of the ROM to figure out what
+on that pesky -1 index resides. I postulated it would be easy to
+figure out if the emulator would indeed also emulate the keyboard and
+the display. One day later:
+
+https://github.com/iddq/sim68xx/tree/px1000
+
+There was it, an emulator with the display and keyboard. It turned out
+it is possible to set the text-width - not sure why this makes sense,
+but it is possible. The -1st character is indeed encoding the
+text-width, which is limited by the size of the display to 40. It also
+turned out that the plaintext to be encrypted is also post-fixed with
+another character: 0x8d. A peculiar detail: on this system, since it's
+7-bit ASCII only the eighth bit is reserved to signal the end of the
+string. Thus 0x8d encodes both a newline character and the EOS.
+
+With the working emulator I was able to verify my C interpretation of
+the encryption algorithm, and thus I could start into phase 2,
+breaking the crypto.
+
+Dramatis Persoanae
+
+The algorithm itself can be shown in a simplified block diagram:
+
+https://cryptomuseum.com/crypto/philips/px1000/svg/px1000_nsa_flow.svg
+
+The mysterious key
+
+Remember this device is a 7-bit ASCII input device, how can someone
+enter an encryption key without much hassle? The engineers came up
+with a nice idea, take an arbitrary 16 byte string, zero out the top
+nibble of each byte, and only use the lower (and slightly higher
+entropy) nibble, providing with a 64-bit key, which is stronger than
+the measly 56 bit key of DES.
+
+Let's introduce our other main characters. In the schema, on the top
+left, the 16 byte block denoted 'L' is supposed to be a set of four
+linear feedback shift registers. This is the bad guy, the end level
+boss, he is elusive and changes like a chameleon.
+
+To the right we have two blue blocks - denoted Va and Vb - of four
+bytes each which contain some transformation of the encryption
+key. This is a supporting character, mostly stays in the background,
+has little character development.
+
+Right of Va we have the 4 byte C block, which is a FIFO initially
+containing a transformation of parts of the encryption key, but it
+later becomes a cipher-feedback buffer containing the last 4 bytes of
+ciphertext. Another supporting character, this guy looks strange in
+the beginning, but later on becomes a familiar face we know and
+recognize.
+
+The block denoted by P is really just a transformation which replaces
+each 4 bit nibble with another 4 bit nibble based on a lookup-table.
+This young lady is the sister of F, but is mostly staying predictable.
+
+The big yellow block F in the middle is eight non-linear transforms
+that converts 6 input bits into one output bit, more on this
+later. This lady is another trouble maker she's the femme fatale of
+this play, she's working with the evil guy, making things difficult.
+
+And last the small block K is a transformation of the keystream byte,
+that rotates the keystream byte left by the number of byte being
+currently encrypted modulo 8. Just another supporting character
+without much depth.
+
+Act I
+
+It is very important to see how these blocks are initialized, this is
+the part where the alarm bells start getting louder. During
+initialization one operation comes up everywhere: the low nibble gets
+complemented and set as the high nibble.
+
+unsigned char invertLoNibble2Hi(unsigned char x) {
+  return ((~x) << 4) | x;
+}
+
+In fact this is how 15 of the 16 bytes of the LFSR are initialized,
+each low nibble of the key is taken and inflated into a byte. The last
+byte is set to 0xff. As code:
+
+  for(i=0;i<15;i++) {
+    lfsr[i] = invertLoNibble2Hi(key[i]);
+  }
+  lfsr[15]=0xff;
+
+Now, if you happen to know somehow the internal state of the LFSR and
+know how to reverse it, then it becomes trivial to check if any state
+has the special structure of the initial state from which the key can
+be trivially recovered. Not sure if that actually helps, but it's ugly
+anyway.
+
+Blocks Va, Vb and C are similarly initialized:
+
+  for(i=0;i<4;i++) {
+    V[i]   = invertLoNibble2Hi(key[i]   ^ key[i+4]);
+    V[i+4] = invertLoNibble2Hi(key[i+8] ^ key[i+12]);
+    C[i] = V[i] ^ V[i+4] ^ 0xf0;
+  }
+
+At first it's not obvious, but if you expand V[i] and V[i+4] when
+setting C[i] and you do the math, you will come to the conclusion that
+the values of C can only be of these 16 values:
+
+ {0x0f, 0x1e, 0x2d, 0x3c,
+  0x4b, 0x5a, 0x69, 0x78,
+  0x87, 0x96, 0xa5, 0xb4,
+  0xc3, 0xd2, 0xe1, 0xf0}
+
+this can be easily verified by running this python code
+
+import iterools
+
+def ilth(x):
+    return (x^0xf) << 4 | x
+
+sorted([f"{x:02x}"
+        for x in {ilth(a)^ilth(b)^0xf0
+                  for a,b in
+                  itertools.product(range(16),range(16))}])
+
+<narrator> My alarm bells are kinda deafening by now, how's yours?
+
+After the initialization, the stream cipher is ready to be used. For
+each key-stream byte the LFSR is mutated, then combined with the V and
+C blocks fed into the F function and then xored into the
+plaintext. Let's have a look first at the mutation of the LFSR block:
+
+    for(round_counter = 0x1f;round_counter>=0;round_counter--) {
+      acc = 0;
+      for(i=0;i<16;i++) { // FAC7 in the code this loop is unrolled
+        acc ^= lfsr[i] & lookupTable[(round_counter+i)%16];
+      } // FB43
+
+      acc = ((acc >> 1) ^ acc) & 0x55; // FB45..FB4A
+
+      // (round_counter ^ 0xff) & 0xf == is twice the sequence 15..0
+      tmp=(round_counter ^ 0xff) & 0xf;
+      lfsr[tmp] = ((lfsr[tmp] << 1) & 0xAA) | acc;
+    } // FB63
+
+Doesn't really look like a traditional - or set of - LFSR to me. But
+if the Crypto Museum people say so, I'm going with their
+insights. Nota bene: Those 16-bit hex numbers in the comments mark the
+addresses, where in the ROM this code can be found.
+
+Normally an LFSR emits a bit after each advancement. In this code this
+is not obvious how it is done. The following snippet shows how 4 bytes
+are being extracted from the LFSR after it has been mutated:
+
+    for(i=0;i<4;i++) {
+      tmp = lfsr[i+7]; // FB68..FB6C
+      tmp = (tmp << 2) | (tmp >> 6); // 2x rotate left FB6E..FB72
+      lfsr_out[i] = tmp ^ lfsr[i]; // FB74 .. FB7A
+    }
+
+If you squint you might be imagining four LFSRs there, but as you will
+see, for our final attack this doesn't matter much. This concludes the
+left side of the schema before being fed into the non-linear function
+F.
+
+On the right side of the schema you can see how Va and the ciphertext
+FIFO are being xored and mapped through P, in code this looks as
+such:
+
+    for(i=0;i<4;i++) {
+      tmp = V[i] ^ CiphertextFifo[i];
+      acc = map4to4bit[i][tmp >> 4] << 4;
+      acc |= map4to4bit[i][tmp & 0xf];
+      pbuf[i] = acc ^ V[i+4];
+    }
+
+Looks straightforward, but if we unpack this in the context of
+encrypting the very first character (which is probably '(' but this is
+irrelevant here), then we can unpack:
+
+   tmp = V[0] ^ CiphertextFifo[0]
+
+where
+
+   CiphertextFifo[0] = V[0] ^ V[4] ^ 0xf0
+
+which drops out V[0] and thus:
+
+   tmp == V[4] ^ 0xf0
+
+and we know that all values of V are values where the high nibble is
+just the inversion of the low nibble, and if we xor that with 0xf0, we
+get that tmp can only be one of these 16 values:
+
+   {0x00, 0x11, 0x22, 0x33,
+    0x44, 0x55, 0x66, 0x77,
+    0x88, 0x99, 0xaa, 0xbb,
+    0xcc, 0xdd, 0xee, 0xff}
+
+Strange, huh? This loop runs 4 times, with similar results for each
+output byte, just saying. Later when the Ciphertext FIFO is filled
+with real ciphertext this doesn't apply anymore, but then the contents
+of this buffer are known - since its the ciphertext, huh. The mapping
+itself of 4 bits to other 4 bits was relatively uninteresting, at
+least I couldn't immediately see anything wrong with it. And also
+xoring that with Vb was also much less exciting.
+
+Now that we have the inputs to the F function, we can analyze what
+happens there. The code is a bit dense, we'll unpack it later:
+
+    for(i=8, acc=0;i>0;i--) {
+      // FBB9
+      for(j=1,tmp=0;j<4;j++) {
+        tmp = (tmp << 1) | (lfsr_out[j] >> 7);
+        lfsr_out[j]<<=1;
+        tmp = (tmp << 1) | (pbuf[j] >> 7);
+        pbuf[j]<<=1;
+      }
+      tmp=lookupTable6To1bit[tmp];
+
+      acc=(acc<<1) + ((tmp>>(i-1)) & 1);
+    } // 0xfbd9
+
+The outer loop takes care that all 8 bits of each input of the 6 input
+bytes get used in F() and that the output of F() is being assembled
+back into one byte. The inner loop interleaves the 6 input bits from
+lfsr[1], pbuf[1], lfsr[2], pbuf[2], lfsr[3] and finally pbuf[3]. The
+lookup table produces one bit, which in the last line is put into the
+correct bit-position of the accumulator. It's a pretty straightforward
+bit-sliced 6-byte-to-1-byte mapping. The lookup table is neat, it's 64
+bytes, which is indexed by the 6 bit interleaved value, and from the
+resulting byte the i-th bit is extracted. Very compact, neat.
+
+The next steps are unspectacular (keeping in mind that curChar starts
+with -1):
+
+    acc ^= pbuf[0] ^ lfsr_out[0];
+
+    // FBDF
+    tmp = (curChar + 1) & 7;
+    acc = (acc << tmp) | (acc >> (8-tmp)); // rotate left by tmp
+
+    ciphertext[curChar] = plaintext[curChar] ^ acc
+
+Note that for decryption only this last line needs to swapped be
+around.
+
+One last step is needed before we can loop back to mutating the LFSR,
+and that is advancing the ciphertext FIFO, now that there is a
+ciphertext byte. Again this is pretty straightforward, and after 4
+ciphertext bytes the peculiar structure noted above of the initial 4
+bytes in this FIFO is lost:
+
+    // FC05
+    CiphertextFifo[4] = ciphertext[curChar];
+    for(i=0;i<4;i++) {
+      // rot left
+      CiphertextFifo[i] = (CiphertextFifo[i+1] << 1) | (CiphertextFifo[i+1] >> 7);
+    } // FC15
+
+A small optimization is that the array holding the FIFO is actually 5
+bytes, and the newest ciphertext byte is always added to the 5
+position, which enables this compact loop updating the 4 effective
+items in this FIFO.
+
+If there is more plaintext bytes to encrypt, then the algorithm loops
+back to mutating the LFSR, otherwise everything's done.
+
+ACT II - Climax
+
+So this all looks kind of fishy, but how do one actually break this
+scheme? Well for a long time I focused on somehow figuring out the
+LFSR and how it can be decomposed in 4 LFSRs of 32, 31, 29, and 27 bit
+length as indicated on the Crypto Museum schema. Many hours were
+wasted into slicing and dicing the LFSR, mutating it, slicing and
+dicing it again, writing bit level differs, staring at colored bits,
+throwing Berlekamp-Massey at it, trying to write my own 32/31/29/27
+bit LFSRs and seeing if I can somehow slice-n-dice a state from the
+big one into the ones I implemented. It was a nightmare of dead ends,
+failure, despair. Boredom started to set in, I started to ask friends,
+maybe they can figure out how this works. They said it's easy, but
+they have no time now for this. Anyway, maybe this is an LFSR or even
+four, but I was unable to figure out how.
+
+I also started to consult the bible of cryptanalysis, Antoine Joux'
+masterpiece: Algorithmic Cryptanalysis. It has a chapter: "Attacks on
+stream ciphers" and this chapter is about LFSRs hidden behind a
+non-linear function F, Antoine calls these filtered-generators:
+
+> The filtered generator tries to hide the linearity of a core LFSR by
+> using a complicated non-linear output function on a few bits. At
+> each step, the output function takes as input t bits from the inner
+> state of the LFSR. These bits are usually neither consecutive, nor
+> evenly spaced within the register.
+
+Bingo! Exactly what I'm supposedly staring at for days now, the big
+guy and the femme fatale. The chapter mostly covers correlation
+attacks, but at the end there is also mention of algebraic attacks,
+the latter gives me a warm fuzzy feeling. Algebra is elementary school
+stuff, I can do that!
+
+Antoine goes on:
+
+> The function f is usually described either as a table of values or
+> as a polynomial. Note that, using the techniques of Section 9.2, f
+> can always be expressed as a multivariate polynomial over F2.
+
+The technique in section 9.2 is is called the Möbius transform which
+is used to calculate the ANF - the algebraic normal form - of a
+boolean function. I tried to implement the Möbius transform as given
+in algorithm 9.6 in Joux' masterpiece, but the results were not
+providing the expected outputs as the lookup table. After reading a
+bunch of papers on algebraic normal forms, I learned that different
+disciplines call this different names, such as:
+
+ - ANF Transform (ANFT),
+ - fast Möbius (or Moebius) Transform,
+ - Zhegalkin Transform,
+ - Positive Polarity Reed–Muller Transform (PPRMT)
+
+Valentin Bakoevs excellent paper "Fast Bitwise Implementation Of The
+Algebraic Normal Form Transform"" went into much more detail than Joux
+on this topic, and an implementation of his Algorithm 1, gave the
+expected results.
+
+void moebius(uint8_t *f, int n) {
+   int blocksize=1;
+   int step;
+   for(step=1; step<=n;step++) {
+     int source=0;
+     while(source < (1<<n)) {
+         int target = source + blocksize;
+         int i;
+         for(i=0;i<blocksize;i++) {
+            f[target+i]^=f[source+i];
+         }
+         source+=2*blocksize;
+     }
+     blocksize*=2;
+   }
+}
+
+By splitting up the original F lookup-table bit-by-bit, and feeding it
+to the above function:
+
+static unsigned char lookupTable6To1bit[64]={ // at 0xFE9B
+   0x96, 0x4b, 0x65, 0x3a, 0xac, 0x6c, 0x53, 0x74,
+   0x78, 0xa5, 0x47, 0xb2, 0x4d, 0xa6, 0x59, 0x5a,
+   0x8d, 0x56, 0x2b, 0xc3, 0x71, 0xd2, 0x66, 0x3c,
+   0x1d, 0xc9, 0x93, 0x2e, 0xa9, 0x72, 0x17, 0xb1,
+   0xb4, 0xe4, 0xa3, 0x4e, 0x27, 0x5c, 0x8b, 0xc5,
+   0xe8, 0x95, 0xe1, 0xd1, 0x87, 0xb8, 0x1e, 0xca,
+   0x1b, 0x63, 0xd8, 0x2d, 0xd4, 0x9a, 0x99, 0x36,
+   0x8e, 0xc6, 0x69, 0xe2, 0x39, 0x35, 0x6a, 0x9c
+};
+
+We get this:
+
+f0= 0110001001101010101110001110101100101011011110001101001000101100
+g0= 0110010100001111101101110100100101011011010010010011000110001110
+
+f1= 1101001000110101011101100011011000111010000010111100010111010010
+g1= 1011100010011110110010011100101110010110101111010100100111111110
+
+f2= 1010110101101100110000111001001011011101010010100001100111000101
+g2= 1100011110101011011011111110111001110111010000101100000010110110
+
+f3= 0101110010001011101000011101100000010110100001111011011010101011
+g3= 0100111010111100100000111100010101011001010100110100111100110000
+
+f4= 1001001110010011010011011010011110000100010101101010111100001101
+g4= 1110110000000000101100101001010100010110101110001000110011100010
+
+f5= 0011110111010100001010110001110111101000101001000101000100111110
+g5= 0010100110010111000101111011001110111111110010001100010010000010
+
+f6= 0110011110101011010111100100010001010101101100010110100001110010
+g6= 0110000110100000001011001011110100100001001111000000010100111100
+
+f7= 1000100001010100100101000110100111100011111111010010111011010001
+g7= 1111000010110001000110110011001001101011101010011011101010101010
+
+The output of the Möbius transform is nothing else - but another
+lookup-table - a boolean function with exactly the same amount of input
+parameters as the the original non-linear function. Using this it is
+possible to create the ANF of the non-linear function as follows:
+
+anf.jpg - alternatively also as latex...
+
+In this equation the g(...) coefficient is the output of the Möbius
+transform, and - since these are bits - either 0 or 1, eliminating
+around half of all terms.
+
+By sticking the above fx and gx pairs into the following beauty:
+
+' ^ '.join(f'{c}')'
+           for c in ['&'.join(
+                         f"x{i}"
+                         for i, x in enumerate(reversed(f'{a:06b}'))
+                         if x == "1")
+                     for a in range(64)
+                     if moebius[a]=='1']
+           if c)
+
+We can construct the ANF. This can then be evaluated for all values
+between 0 and 63 and should produce the same result as the
+corresponding fx. If the result is the exact inverse of fx, then the
+ANF has an odd number of constant 1 terms, and the ANF must be fixed
+by prefixing it with '1 ^'. For illustration purposes behold the ANF
+of f4:
+
+1 ^ (x0) ^ (x1) ^ (x2) ^ (x0&x2) ^ (x4) ^ (x1&x4) ^ (x0&x1&x4) ^ (x1&x2&x4) ^ (x3&x4) ^ (x0&x1&x3&x4) ^ (x0&x2&x3&x4) ^ (x0&x1&x2&x3&x4) ^ (x0&x1&x5) ^ (x0&x2&x5) ^ (x1&x2&x5) ^ (x3&x5) ^ (x1&x3&x5) ^ (x0&x1&x3&x5) ^ (x2&x3&x5) ^ (x4&x5) ^ (x2&x4&x5) ^ (x0&x2&x4&x5) ^ (x3&x4&x5) ^ (x0&x3&x4&x5) ^ (x1&x3&x4&x5) ^ (x1&x2&x3&x4&x5)
+
+Woohooo, look ma, I converted a lookup-table into algebra! I mean I
+defeated the evil temptress the femme fatale! After a few days of
+pondering this, I also converted the lookup table marked as P in the
+schema to its ANFs. Erm, I mean defeated the younger sister. The path
+to this victory was not immediately obvious, since P is a 4 bit to 4
+bit table, and the Möbius transform only applies to boolean functions
+with 1 output bit. The trick was to deconstruct the 4-to-4 mapping into
+four times 4-to-1 mapping, one for each output bit, while of course
+the input bits will be always the same for the same nibble. Hah! Take
+that NSA! Most of your gang is now reduced to a bunch of polynomials!
+
+ACT III - The Fall
+
+But what to do with that big guy, the end level boss, that pesky LFSR
+block? I kinda gave up on finding the polynomial for the LFSR, but
+maybe there is a different way to convert this into algebra? I've
+always been a big fan of angr and symbolic execution. Maybe if I let
+angr consume the loop that mutates the LFSR, I can get some symbolic
+constraints. Symbolic constraints being nothing else than
+equations. The trick was to modify the the loop to not run in place,
+but to output another 16 byte LFSR. Angr can then tell me symbolically
+how the output LFSR depends on the input LFSR. The (much truncated)
+output is promising:
+
+<BV128 lfsr_state_19_128[87:87] ^ lfsr_state_19_128[63:63] ^
+       lfsr_state_19_128[55:55] ^ lfsr_state_19_128[31:31] ^
+       lfsr_state_19_128[23:23] ^ lfsr_state_19_128[7:7] ^
+       lfsr_state_19_128[102:102] ^ lfsr_ state_19_128[86:86] ^
+       lfsr_state_19_128[70:70] ^ lfsr_state_19_128[62:62] ^
+       lfsr_state_19_128[54:54] ^ lfsr_state_19_128[46:46] ^
+       lfsr_state_19_128[30:30] ^ lfsr_state_19_128[14:14] ..
+
+Notice the trailing '..' in the last line, this signals concatenation
+of bit vectors, and in total 128 bits are being concatenated. The big
+guy finally reveals some weakness! Angr gave me the bits I needed to
+xor together for each bit in the next state. After running some sed
+magic on this output, I had 128 lists, with only the bit positions
+contributing to the next state of this bit (see attached
+lfsr-next-bits.txt). Wow, this really looks like algebra, but first
+lets analyze this list of lists a bit more.
+
+I was very interested how these bits are related. I wrote a recursive
+function, taking one bit and visiting recursively all bits that this
+bit depends on. My goal was to figure out if there is loops or islands
+in this graph. This was my recursive function:
+
+def walk(bit, c):
+    c.append(bit)
+    for b in bits[bit]:
+        if b in c: continue
+        c=walk(b,c)
+    return c
+
+I ran it for all values between 0 to 127, I threw away any results I
+previously already saw, and I printed out the bit index for which I
+first saw a result, the length of the result, and the result:
+
+0 32 (0, 1, 8, 9, 16, 17, 24, 25, 32, 33, 40, 41, 48, 49, 56, 57, 64, 65, 72, 73, 80, 81, 88, 89, 96, 97, 104, 105, 112, 113, 120, 121)
+2 31 (2, 3, 10, 11, 18, 19, 26, 27, 34, 35, 42, 43, 50, 51, 58, 59, 66, 67, 74, 75, 82, 83, 90, 91, 98, 99, 106, 107, 114, 115, 122)
+4 29 (4, 5, 12, 13, 20, 21, 28, 29, 36, 37, 44, 45, 52, 53, 60, 61, 68, 69, 76, 77, 84, 85, 92, 93, 100, 101, 108, 116, 124)
+6 27 (6, 7, 14, 15, 22, 23, 30, 31, 38, 39, 46, 47, 54, 55, 62, 63, 70, 71, 78, 79, 86, 87, 94, 102, 110, 118, 126)
+95 28  (6, 7, 14, 15, 22, 23, 30, 31, 38, 39, 46, 47, 54, 55, 62, 63, 70, 71, 78, 79, 86, 87, 94, 95, 102, 110, 118, 126)
+103 28 (6, 7, 14, 15, 22, 23, 30, 31, 38, 39, 46, 47, 54, 55, 62, 63, 70, 71, 78, 79, 86, 87, 94, 102, 103, 110, 118, 126)
+109 30 (4, 5, 12, 13, 20, 21, 28, 29, 36, 37, 44, 45, 52, 53, 60, 61, 68, 69, 76, 77, 84, 85, 92, 93, 100, 101, 108, 109, 116, 124)
+111 28 (6, 7, 14, 15, 22, 23, 30, 31, 38, 39, 46, 47, 54, 55, 62, 63, 70, 71, 78, 79, 86, 87, 94, 102, 110, 111, 118, 126)
+117 30 (4, 5, 12, 13, 20, 21, 28, 29, 36, 37, 44, 45, 52, 53, 60, 61, 68, 69, 76, 77, 84, 85, 92, 93, 100, 101, 108, 116, 117, 124)
+119 28 (6, 7, 14, 15, 22, 23, 30, 31, 38, 39, 46, 47, 54, 55, 62, 63, 70, 71, 78, 79, 86, 87, 94, 102, 110, 118, 119, 126)
+123 32 (2, 3, 10, 11, 18, 19, 26, 27, 34, 35, 42, 43, 50, 51, 58, 59, 66, 67, 74, 75, 82, 83, 90, 91, 98, 99, 106, 107, 114, 115, 122, 123)
+125 30 (4, 5, 12, 13, 20, 21, 28, 29, 36, 37, 44, 45, 52, 53, 60, 61, 68, 69, 76, 77, 84, 85, 92, 93, 100, 101, 108, 116, 124, 125)
+127 28 (6, 7, 14, 15, 22, 23, 30, 31, 38, 39, 46, 47, 54, 55, 62, 63, 70, 71, 78, 79, 86, 87, 94, 102, 110, 118, 126, 127)
+
+Whoa! The first four results are with length 32, 31, 29, 27. That
+seems to be the source of the Crypto Museum people claiming that
+there's 4 small LFSRs hidden in there. There's also 9 positions that
+are not contributing to the first four loops, but which themselves do
+depend on bits in those. To make this all much clearer, I also made my
+script draw a diagram for me:
+
+lfsr.jpg
+
+Bytes of the char array are horizontal increasing indexes left to
+righ, bits vertical with increasing indexed top-down. The homogeneous
+squares constitute the four LFSRs, and the squares half-yellow depend
+on the -LFSR of their other color. Just for reference I also framed
+with yellow border the 0th byte and the 7th byte of the LFSR block, as
+these are used when extracting bits as described above in the
+discussion of the encryption algorithm. Interestingly some of the
+orphan bits are included in extraction of entropy from the LFSR.  Just
+to add a bit of confusion, claripy's bitvector considers such char
+arrays as one big-endian value, which means that bit 127 is the bottom
+bit of byte 0 (the bottom left-most bit) and the least significant bit
+of the bitvector is bit 0 of byte 15 - thus the top right corner of
+the diagram.
+
+ACT IV - Revelation
+
+I had everything converted to polynomials and constraints, so I
+started to try to feed it all directly into z3, but z3 seems to be
+geared more towards non-boolean equations, working with vectors of
+booleans was quite tedious. After some long nights I gave up and
+started anew in claripy, a wrapper around z3 from the fine angr
+people.
+
+With claripy everything went well, I had the first solution! It took
+1:50 minutes, alas it was incorrect! After a few days of debugging my
+constraints, I finally had the correct solution, and it only took 50
+seconds! I defeated the beast! What a symbolic execution!
+
+All you need to do is feed the solver 17 bytes of ciphertext,
+and the solver will either declare that the ciphertext cannot be the
+output of the px1000cr algorithm, or it outputs the encryption key and
+the decrypted 17 bytes of plaintext. The rest of the plaintext can be
+recovered by decrypting the ciphertext with the recovered key. With a
+little change it is also possible to solve keys for shorter
+ciphertexts, but then there will be multiple key candidates which must
+be tested by the user. The number of key candidates in that case is
+2^(17-len(ciphertext)).
+
+Looking at my script I realized I could keep everything symbolic, and
+pre-compute all constraints, and with this change a speed-run is
+possible. With this calculating the solution takes now less than 4
+seconds!
+
+The equation system, printed out in human readable form take about 25
+megabyte, there is definitely room for improvement. F. Armknechts
+dissertation provides loads of information making this attack much
+more efficient:
+
+http://madoc.bib.uni-mannheim.de/1352/1/Armknecht.pdf
+
+With a few changes you can even calculate things backwards, like what
+plaintext and key combination generates the following ciphertext:
+"(NSA backdoor fun".
+
+Joining the Cast
+
+I invite everyone to download the fine emulator and run the ROM
+themselves and plug the ciphertext into the solution.
+
+To run the PX1000 EPROM in a simulator you need to execute the following
+eldritch incantation:
+
+sim68xx/src/boards/sim6303 ./PX1000_EPROM.s19 ./PX1000_EPROM.map ./PX1000_EPROM.sim
+
+the map file is optional, it just provides nice symbols for the
+ROM. The .sim file is however very important, it contains a bunch of
+commands important for the simulator. If you peek at this file, you
+will find it patches parts of the keyboard and the display handlers
+and also takes care of the sleep function - which doesn't really work
+in our context. The second part of the .sim file orders the simulator
+to run and to display the contents of the plaintext/ciphertext buffer
+after interrupting the simulator by pressing ^c.
+
+When you have the simulator running you can press ^k for entering a 16
+byte encryption key, which you have to confirm by pressing ^k
+again. And if you are not in key-entry mode, you can just type away
+and enter some plaintext. If you are happy with your plaintext, you
+should press ^e to encrypt the message. Since we do not have a working
+modem for the transmission of the data buffer, the only way to get the
+encrypted data is to press ^c which gets us to the simulator console,
+and if this is the first time pressing ^c it also displays a hexdump
+of the data buffer - containing either the plain- or ciphertext.
+
+Speculation
+
+I do not know if the NSA did have a SAT solver like z3 back in 1983,
+but the fact that I can recover a key 40 years later within 4 seconds
+on a laptop CPU in a single thread, while I am far from being able to
+do so for the same if DES would be used lets me conclude that the
+PX1000cr algorithm is indeed a confirmed backdoor, and also that this
+project has been very much fun.
+
+As noted above though, the equation system that needs to be solved is
+quite huge, it is safe to assume that the NSA needed much more
+efficient ways in the 80ies to break this algorithm.
+
+A very simple and cheap attack which also amortizes the costs of the
+algebraic attack is based on the fact that the first and last
+character and the top bits in between leak the keystream. This makes
+it almost trivial to detect key reuse. And this being a stream cipher
+key reuse is catastrophic in cryptographic sense, a good example of
+this is the Venona project and Julius and Ethel Rosenberg's fate. We
+can say that the nsa has for decades worked on recovering plaintext
+from two-timepads, but in the Venona this was more difficult as they
+didn't know which two messages were sharing the same key. With the
+px1k this is trivial. For Venona it's a solid bet that the NSA built a
+lot of HW that recovers plaintext from two plaintexts xor-ed
+together. This means they can use the more expensive algebraic or
+other attacks for cryptograms with unique keys. This is an important
+insight, there's not just one backdoor here, but multiple ones that
+work together.
+
+Also notable is that this backdoor is definitely predating the NOBUS -
+nobody but us - policy. I heard that other intelligence services did
+notice the change of algorithm in the PX1000 and also had done their
+own analysis.
+
+Epilogue
+
+A few days after sharing this solution with the cryptomuseum people, I
+got a hint. The taps for the LSFRs are much less complicated than
+thought, and they're hiding in plain sight. Remember this line from
+the loop updating the 16 byte lfsr block:
+
+        acc ^= lfsr[i] & lookupTable[(round_counter+i)%16];
+
+Well this lookupTable is the taps of the four LFSRs, only the taps are
+bits-liced just like the LFSRs themselves. The only magic was that the
+round_counter starts from 0x1f, thus the 15th byte was the first to
+process for extracting the taps. The following function from the
+attached lfsr32.py script takes care of extracting the nth LFSR taps:
+
+taps_t = (
+   0x06, 0x0B, 0x0A, 0x78, 0x0C, 0xE0, 0x29, 0x7B,
+   0xCF, 0xC3, 0x4B, 0x2B, 0xCC, 0x82, 0x60, 0x80)
+
+def extract(taps, i):
+    # left to right
+    tr = [''.join(str((taps[j] >> b) & 1) for j in range(16)) for b in range(8)]
+    # horizontal bottoms-up lines appended
+    return (tr[(i*2)+1]+tr[(i*2)])
+
+Applying the extract(taps_t, i) for i taking values 0..3 we get these
+left-zero-padded results:
+
+ 32 bit: 11100001111101000100001111110000  e1f443f0
+ 31 bit: 01111011101110001000100010001000  7bb88888
+ 29 bit: 00010111000100100001000100000000  17121100
+ 27 bit: 00000100110011010001010111101010  04cd15ea
+
+Each of these tap configurations create LFSRs that are of maximum
+cycle size. Implementations of these are included in the attached
+lfsr.c file.
+
+Thanks
+
+Finally I would like to thank, ben, phr3ak, the Crypto Museum people,
+jonathan, antoine, the angr devs, asciimoo and dnet for their support!
+
+Act I & II are also available on your favorite streaming platform as a talk:
+ - https://www.youtube.com/watch?v=8VTmfiifkRU
+ - https://hsbp.s3.eu-central-1.amazonaws.com/camppp7e5/backdoor.mp4
+
+In attach:
+
+ px1000.jpg         - an image of the PX1000cr
+ px1kcr.c           - the most literal c implementation of the EPROM
+ blockschema.svg    - the blockschema made by the Crypto Museum people
+ anf.jpg            - the formula for the ANF from A. Joux' tome
+ angr_tgt.c         - a synthesized LFSR implementation for angr
+ angr_tgt.py        - angr script to extract constraints for the LFSR
+ core.[ch]          - encryption implementation
+ utils.[ch]         - various debug and experimental functions
+ decrypt.c          - a decrypt tool based on core.[ch]
+ encrypt.c          - an encrypt tool based on core.[ch]
+ lfsr-next-bits.py  - analyze the dependency graph of the LFSR bits
+ lfsr-next-bits.txt - the LFSR bit dependency graph
+ lfsr.jpg           - the LFSR diagram
+ moebius.c          - calculate the Möbius transform of F
+ f-anf.py           - construct, verify and output the ANF of F
+ moebius4.py        - calculate the Möbius and ANF of the 4-to-4 mapping
+ px1k-claripy.py    - the final attack
+ PX1000_EPROM.map   - the memory map of the px1000cr
+ PX1000_EPROM.s19   - the px1000cr ROM in s19 format - for the simulator
+ 64bit2key.py       - tool taking a key, returning possible 16 byte password
+ lfsr.c             - c implementation of the four LFSRs
+ lfsr32.py          - extracting the four LFSRs from the lookupTable

@@ -1,0 +1,13 @@
+# patching the keyboard to run in the sim
+mf 4000 41ff 00
+mm 401f ff
+mm 4001 02
+mm f4d8 01 01
+# patching the display to work with the sim
+mm ec6f 01 01
+mm ec25 01 01
+# patching out sleep
+mm f406 01
+
+g
+md 288 20
