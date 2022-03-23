@@ -73,11 +73,6 @@ void px1kcr(char *plaintext, const int ptlen, const CryptMode EncryptorDecryptMo
   // FA9C
   hexdump("CTFifo", CiphertextFifo, 4);
 
-  // lsfr taps (source unknown)
-  // 27b 27,5,2,1
-  // 29b 29,27
-  // 31b 31,28
-  // 32b 32,22,2,1
   // initialize LFSRs
   for(i=0;i<15;i++) { // FA9E
     lfsr[i] = invertLoNibble2High(truncated_input_key[i]);
